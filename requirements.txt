@@ -1,5 +1,8 @@
 streamlit
-transformers
 torch
+transformers
 kagglehub
-googletrans==4.0.0rc1
+deep-translator
+accelerate
+sentencepiece
+protobuf
