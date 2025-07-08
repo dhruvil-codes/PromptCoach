@@ -1,8 +1,5 @@
 streamlit
-torch
 transformers
+torch
 kagglehub
 deep-translator
-accelerate
-sentencepiece
-protobuf
