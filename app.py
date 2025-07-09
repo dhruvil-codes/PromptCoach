@@ -1,424 +1,465 @@
 import streamlit as st
 import torch
 import time
-from deep_translator import GoogleTranslator
+import json
+from typing import Dict, List, Tuple
 
-# Check if running on Streamlit Cloud
+# Check if running locally with Gemma 3n access
 try:
     import kagglehub
     from transformers import AutoTokenizer, AutoModelForCausalLM
-    STREAMLIT_CLOUD = False
+    GEMMA_AVAILABLE = True
 except ImportError:
-    STREAMLIT_CLOUD = True
+    GEMMA_AVAILABLE = False
 
-LANGUAGES = {
-    'English': 'en', 'Spanish': 'es', 'French': 'fr', 'German': 'de',
-    'Italian': 'it', 'Portuguese': 'pt', 'Russian': 'ru', 'Chinese': 'zh',
-    'Japanese': 'ja', 'Korean': 'ko', 'Arabic': 'ar', 'Hindi': 'hi',
-    'Dutch': 'nl', 'Swedish': 'sv', 'Polish': 'pl'
+# Marketing prompt categories
+PROMPT_CATEGORIES = {
+    "Landing Page Headlines": {
+        "description": "Compelling headlines that grab attention and drive conversions",
+        "example": "AI-powered project management tool for remote teams"
+    },
+    "Product Descriptions": {
+        "description": "Persuasive descriptions that highlight benefits and drive sales",
+        "example": "Wireless noise-cancelling headphones with 30-hour battery"
+    },
+    "Email Subject Lines": {
+        "description": "Subject lines that maximize open rates and engagement",
+        "example": "New product launch with early bird discount"
+    },
+    "Social Media Posts": {
+        "description": "Engaging posts that drive interaction and sharing",
+        "example": "Behind-the-scenes content about company culture"
+    },
+    "Ad Copy": {
+        "description": "Compelling ad copy that drives clicks and conversions",
+        "example": "Online course teaching digital marketing"
+    }
 }
 
 @st.cache_resource
-def load_model():
-    """Load Gemma 3n model with fallback for Streamlit Cloud"""
-    if STREAMLIT_CLOUD:
-        st.warning("⚠️ Running in demo mode - Gemma 3n model not available on Streamlit Cloud")
+def load_gemma_model():
+    """Load Gemma 3n model from Kaggle Hub"""
+    if not GEMMA_AVAILABLE:
         return None, None
     
     try:
-        with st.spinner("🔄 Loading Gemma 3n model... This may take a few minutes on first run."):
-            # Download the E2B model (smaller, 2GB memory footprint)
-            GEMMA_PATH = kagglehub.model_download("google/gemma-3n/transformers/gemma-3n-e2b")
+        with st.spinner("Loading Gemma 3n model..."):
+            # Download the Gemma 3n E2B model
+            path = kagglehub.model_download("google/gemma-3n/transformers/gemma-3n-e2b")
             
-            # Load tokenizer
-            tokenizer = AutoTokenizer.from_pretrained(GEMMA_PATH)
-            
-            # Load model with optimizations for lower memory usage
+            # Load tokenizer and model
+            tokenizer = AutoTokenizer.from_pretrained(path)
             model = AutoModelForCausalLM.from_pretrained(
-                GEMMA_PATH,
-                torch_dtype=torch.float16,  # Use half precision
+                path,
+                torch_dtype=torch.float16,
                 device_map="auto",
                 low_cpu_mem_usage=True,
                 trust_remote_code=True
             )
             
-            st.success("✅ Gemma 3n model loaded successfully!")
             return tokenizer, model
             
     except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
-        st.info("💡 This might be due to memory constraints. Try running locally or on a machine with more RAM.")
+        st.error(f"Error loading Gemma 3n: {str(e)}")
         return None, None
 
-def translate_text(text, target_language):
-    """Translate text using deep-translator"""
-    try:
-        if target_language == 'English' or not text.strip():
-            return text
-        
-        target_code = LANGUAGES.get(target_language, 'en')
-        if target_code == 'en':
-            return text
-            
-        translator = GoogleTranslator(source='auto', target=target_code)
-        translated = translator.translate(text)
-        return translated
-    except Exception as e:
-        return f"Translation error: {str(e)}"
-
-def generate_with_gemma(prompt, template_type, num_outputs, temperature, max_tokens, tokenizer, model):
-    """Generate content using Gemma 3n model"""
-    try:
-        # Apply marketing-specific prompts
-        if template_type == "Landing Page Headlines":
-            system_prompt = "You are a skilled marketing copywriter. Create compelling, attention-grabbing headlines that drive conversions. Focus on benefits, urgency, and emotional appeal."
-            prompt = f"{system_prompt}\n\nCreate a powerful headline for: {prompt}\n\nHeadline:"
-        elif template_type == "Product Descriptions":
-            system_prompt = "You are an expert product copywriter. Write persuasive descriptions that highlight benefits, features, and value propositions to drive sales."
-            prompt = f"{system_prompt}\n\nWrite a compelling product description for: {prompt}\n\nDescription:"
-        elif template_type == "Email Subject Lines":
-            system_prompt = "You are an email marketing specialist. Create subject lines that maximize open rates with urgency, curiosity, and clear value."
-            prompt = f"{system_prompt}\n\nGenerate an effective email subject line for: {prompt}\n\nSubject:"
-        elif template_type == "Social Media Posts":
-            system_prompt = "You are a social media content creator. Write engaging posts that drive engagement, shares, and conversions."
-            prompt = f"{system_prompt}\n\nCreate a social media post for: {prompt}\n\nPost:"
-        elif template_type == "Ad Copy":
-            system_prompt = "You are a digital advertising specialist. Write compelling ad copy that drives clicks and conversions."
-            prompt = f"{system_prompt}\n\nWrite ad copy for: {prompt}\n\nAd:"
-        
-        # Tokenize the input
-        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        
-        results = []
-        for i in range(num_outputs):
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs,
-                    max_new_tokens=max_tokens,
-                    do_sample=True,
-                    temperature=temperature,
-                    top_p=0.95,
-                    top_k=50,
-                    repetition_penalty=1.1,
-                    no_repeat_ngram_size=3,
-                    pad_token_id=tokenizer.eos_token_id,
-                    eos_token_id=tokenizer.eos_token_id
-                )
-            
-            # Decode the output
-            generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Extract only the new generated content
-            new_content = generated_text.replace(prompt, "").strip()
-            
-            # Clean up the output
-            if new_content:
-                # Take the first line/sentence for cleaner output
-                lines = new_content.split('\n')
-                clean_content = lines[0].strip() if lines else new_content
-                
-                if clean_content and len(clean_content) > 10:  # Ensure meaningful content
-                    results.append(f"**Variation {i+1}:**\n{clean_content}")
-        
-        return "\n\n".join(results) if results else "No suitable content generated. Try adjusting your prompt or settings."
-        
-    except Exception as e:
-        return f"Generation error: {str(e)}"
-
-def demo_generate_content(prompt, template_type, num_outputs):
-    """Demo content generation when model is not available"""
-    demo_content = {
-        "Landing Page Headlines": [
-            f"🚀 Transform Your Business with {prompt} - See Results in 24 Hours!",
-            f"💡 The Ultimate {prompt} Solution That Actually Works",
-            f"⚡ Revolutionary {prompt} - Join 10,000+ Happy Customers",
-            f"🎯 Stop Struggling with {prompt} - We've Got You Covered",
-            f"🔥 The {prompt} Everyone's Talking About - Try It Free!"
-        ],
-        "Product Descriptions": [
-            f"Experience the next generation of {prompt} designed for modern professionals. Our innovative solution delivers exceptional results while saving you time and effort. Perfect for busy teams who demand quality and efficiency.",
-            f"Transform your workflow with our premium {prompt}. Built with cutting-edge technology and user-friendly design for maximum productivity. Trusted by industry leaders worldwide.",
-            f"Discover why thousands choose our {prompt}. Reliable, efficient, and backed by 24/7 support for your peace of mind. Start your free trial today.",
-            f"Elevate your business with our award-winning {prompt}. Proven results, exceptional quality, and unmatched customer satisfaction guaranteed.",
-            f"The ultimate {prompt} for ambitious professionals. Streamline operations, boost efficiency, and achieve your goals faster than ever before."
-        ],
-        "Email Subject Lines": [
-            f"🎯 Your {prompt} Strategy Needs This (Open Now)",
-            f"URGENT: {prompt} Deadline Approaching - Act Fast!",
-            f"✨ New {prompt} Feature Just Launched - Exclusive Access",
-            f"📈 Boost Your {prompt} Results by 300% (Proven Method)",
-            f"🔥 Limited Time: {prompt} Offer Ends Tonight"
-        ],
-        "Social Media Posts": [
-            f"Just discovered the game-changing {prompt} that's revolutionizing how we work! 🚀 Who else is ready to level up? #productivity #innovation",
-            f"💡 Pro tip: The secret to mastering {prompt} isn't what you think... Here's what actually works 👇 #tips #success",
-            f"🔥 Hot take: If you're not using {prompt} in 2025, you're already behind. Here's why it matters... #trendingnow",
-            f"✨ Transform your {prompt} game with this simple trick. Results speak for themselves! 📈 #results #growth",
-            f"🎯 Anyone else obsessed with optimizing their {prompt}? Share your best tips below! 👇 #community #sharing"
-        ],
-        "Ad Copy": [
-            f"Ready to revolutionize your {prompt}? Our proven system delivers results in just 24 hours. Join thousands of satisfied customers. Click now!",
-            f"Stop wasting time on {prompt} that doesn't work. Our solution is trusted by industry leaders. Try it risk-free today!",
-            f"Transform your {prompt} with our award-winning platform. 30-day money-back guarantee. Start your free trial now!",
-            f"The #{prompt} solution that actually works. Proven results, happy customers, unbeatable support. Get started today!",
-            f"Breakthrough {prompt} technology that's changing everything. Limited time offer - 50% off for new users. Act now!"
-        ]
-    }
+def evaluate_prompt(prompt: str, category: str, tokenizer, model) -> Dict:
+    """Evaluate a marketing prompt and provide feedback"""
     
-    selected_content = demo_content.get(template_type, demo_content["Landing Page Headlines"])
-    return "\n\n".join([f"**Variation {i+1}:**\n{content}" for i, content in enumerate(selected_content[:num_outputs])])
+    evaluation_prompt = f"""
+You are PromptCoach, an expert marketing prompt evaluator. Analyze this {category.lower()} prompt and provide constructive feedback.
+
+PROMPT TO EVALUATE: "{prompt}"
+CATEGORY: {category}
+
+Please provide:
+1. SCORE (1-10): Rate the prompt's effectiveness
+2. STRENGTHS: What works well in this prompt
+3. WEAKNESSES: What could be improved
+4. IMPROVED VERSION: Rewrite the prompt to be more effective
+5. A/B VARIATION: Provide an alternative version for testing
+
+Format your response as:
+SCORE: [number]
+STRENGTHS: [strengths]
+WEAKNESSES: [weaknesses]
+IMPROVED VERSION: [improved prompt]
+A/B VARIATION: [alternative prompt]
+"""
+
+    try:
+        inputs = tokenizer(evaluation_prompt, return_tensors="pt").to(model.device)
+        
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=400,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                top_k=50,
+                repetition_penalty=1.1,
+                pad_token_id=tokenizer.eos_token_id
+            )
+        
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        generated_text = response.replace(evaluation_prompt, "").strip()
+        
+        # Parse the response
+        return parse_evaluation_response(generated_text)
+        
+    except Exception as e:
+        return {"error": f"Evaluation failed: {str(e)}"}
+
+def parse_evaluation_response(response: str) -> Dict:
+    """Parse the evaluation response into structured data"""
+    try:
+        lines = response.split('\n')
+        result = {}
+        
+        for line in lines:
+            if line.startswith('SCORE:'):
+                score_text = line.replace('SCORE:', '').strip()
+                try:
+                    result['score'] = int(score_text.split()[0])
+                except:
+                    result['score'] = 5
+            elif line.startswith('STRENGTHS:'):
+                result['strengths'] = line.replace('STRENGTHS:', '').strip()
+            elif line.startswith('WEAKNESSES:'):
+                result['weaknesses'] = line.replace('WEAKNESSES:', '').strip()
+            elif line.startswith('IMPROVED VERSION:'):
+                result['improved'] = line.replace('IMPROVED VERSION:', '').strip()
+            elif line.startswith('A/B VARIATION:'):
+                result['ab_variation'] = line.replace('A/B VARIATION:', '').strip()
+        
+        return result
+        
+    except Exception:
+        return {
+            'score': 5,
+            'strengths': 'Analysis pending...',
+            'weaknesses': 'Analysis pending...',
+            'improved': 'Improved version pending...',
+            'ab_variation': 'A/B variation pending...'
+        }
+
+def demo_evaluation(prompt: str, category: str) -> Dict:
+    """Demo evaluation when Gemma 3n is not available"""
+    return {
+        'score': 7,
+        'strengths': f"Clear product positioning and target audience identification for {category.lower()}",
+        'weaknesses': "Could benefit from stronger emotional triggers and more specific value propositions",
+        'improved': f"Transform your business with our revolutionary {prompt} - Join 10,000+ satisfied customers who've seen 300% growth in just 30 days!",
+        'ab_variation': f"Finally, a {prompt} that actually works - See results in 24 hours or your money back!"
+    }
 
 # App Configuration
 st.set_page_config(
     page_title="PromptCoach - Gemma 3n Marketing Assistant",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_icon="🧠",
+    layout="centered",
+    initial_sidebar_state="collapsed"
 )
 
-# Custom CSS for better styling
+# Custom CSS for minimalist design with Inter font
 st.markdown("""
 <style>
-    .main-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 2rem;
-        border-radius: 15px;
-        margin-bottom: 2rem;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    
+    * {
+        font-family: 'Inter', sans-serif !important;
+    }
+    
+    .main {
+        padding: 1rem 2rem;
+        max-width: 800px;
+        margin: 0 auto;
+    }
+    
+    .header {
         text-align: center;
+        margin-bottom: 3rem;
+        padding: 2rem 0;
+        border-bottom: 1px solid #e5e7eb;
+    }
+    
+    .header h1 {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #111827;
+        margin-bottom: 0.5rem;
+    }
+    
+    .header p {
+        font-size: 1.1rem;
+        color: #6b7280;
+        font-weight: 400;
+    }
+    
+    .input-section {
+        background: #f9fafb;
+        padding: 2rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+        border: 1px solid #e5e7eb;
+    }
+    
+    .results-section {
+        background: white;
+        padding: 2rem;
+        border-radius: 12px;
+        border: 1px solid #e5e7eb;
+        margin-bottom: 2rem;
+    }
+    
+    .score-display {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+    }
+    
+    .score-circle {
+        width: 60px;
+        height: 60px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.5rem;
+        font-weight: 700;
         color: white;
     }
     
-    .feature-card {
-        background: #f8f9fa;
-        padding: 1.5rem;
-        border-radius: 10px;
-        border-left: 4px solid #667eea;
-        margin: 1rem 0;
-    }
+    .score-good { background: #10b981; }
+    .score-medium { background: #f59e0b; }
+    .score-poor { background: #ef4444; }
     
-    .output-container {
-        background: #ffffff;
-        padding: 2rem;
-        border-radius: 15px;
-        border: 2px solid #e9ecef;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        margin: 1rem 0;
-    }
-    
-    .demo-warning {
-        background: #fff3cd;
-        border: 1px solid #ffeaa7;
+    .feedback-item {
+        margin-bottom: 1.5rem;
         padding: 1rem;
         border-radius: 8px;
-        margin: 1rem 0;
+        border-left: 4px solid #e5e7eb;
+    }
+    
+    .feedback-item h4 {
+        font-size: 1rem;
+        font-weight: 600;
+        color: #111827;
+        margin-bottom: 0.5rem;
+    }
+    
+    .feedback-item p {
+        color: #4b5563;
+        line-height: 1.6;
+        margin: 0;
+    }
+    
+    .strengths { border-left-color: #10b981; background: #f0fdf4; }
+    .weaknesses { border-left-color: #ef4444; background: #fef2f2; }
+    .improved { border-left-color: #3b82f6; background: #eff6ff; }
+    .variation { border-left-color: #8b5cf6; background: #f5f3ff; }
+    
+    .stButton button {
+        width: 100%;
+        background: #111827;
+        color: white;
+        border: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        font-weight: 500;
+        font-size: 1rem;
+        transition: all 0.2s;
+    }
+    
+    .stButton button:hover {
+        background: #1f2937;
+        transform: translateY(-1px);
+    }
+    
+    .stSelectbox > div > div {
+        border-radius: 8px;
+        border: 1px solid #d1d5db;
+    }
+    
+    .stTextArea > div > div > textarea {
+        border-radius: 8px;
+        border: 1px solid #d1d5db;
+        font-family: 'Inter', sans-serif;
+    }
+    
+    .demo-notice {
+        background: #fef3c7;
+        border: 1px solid #f59e0b;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 2rem;
+        text-align: center;
+    }
+    
+    .demo-notice p {
+        color: #92400e;
+        font-weight: 500;
+        margin: 0;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Header
-st.markdown("""
-<div class="main-header">
-    <h1>🚀 PromptCoach - Powered by Gemma 3n</h1>
-    <p style="font-size: 1.2rem; margin-top: 1rem;">AI-Powered Marketing Content Generator for the Modern Marketer</p>
-    <p style="font-size: 1rem; opacity: 0.9;">Built for Google Gemma 3n Hackathon | Multilingual Support | Real-time Generation</p>
-</div>
-""", unsafe_allow_html=True)
-
-# Model Loading
+# Load model
 if "tokenizer" not in st.session_state or "model" not in st.session_state:
-    tokenizer, model = load_model()
+    tokenizer, model = load_gemma_model()
     st.session_state.tokenizer = tokenizer
     st.session_state.model = model
 
-# Sidebar Configuration
-with st.sidebar:
-    st.markdown("## ⚙️ Generation Settings")
-    
-    template = st.selectbox(
-        "Content Type",
-        ["Landing Page Headlines", "Product Descriptions", "Email Subject Lines", "Social Media Posts", "Ad Copy", "Custom Prompt"],
-        help="Choose the type of marketing content you want to generate"
-    )
-    
-    num_outputs = st.slider(
-        "Number of Variations",
-        1, 5, 3,
-        help="Generate multiple variations for A/B testing"
-    )
-    
-    if not STREAMLIT_CLOUD and st.session_state.model is not None:
-        temperature = st.slider(
-            "Creativity Level",
-            0.1, 1.5, 0.8, 0.1,
-            help="Higher values = more creative output"
-        )
-        
-        max_tokens = st.slider(
-            "Max Output Length",
-            50, 300, 150, 25,
-            help="Maximum number of tokens to generate"
-        )
-    else:
-        temperature = 0.8
-        max_tokens = 150
-    
-    st.markdown("---")
-    st.markdown("## 🌐 Translation")
-    
-    translate_output_to = st.selectbox(
-        "Translate Output To",
-        list(LANGUAGES.keys()),
-        index=0,
-        help="Translate generated content to another language"
-    )
-    
-    st.markdown("---")
-    st.markdown("## 📊 Model Info")
-    
-    if STREAMLIT_CLOUD:
-        st.markdown("""
-        <div class="demo-warning">
-            <strong>Demo Mode Active</strong><br>
-            Running template-based generation.<br>
-            Deploy locally to use Gemma 3n model.
-        </div>
-        """, unsafe_allow_html=True)
-    elif st.session_state.model is not None:
-        st.success("✅ Gemma 3n E2B Model Loaded")
-        st.info("🔧 Using 2GB memory footprint")
-    else:
-        st.error("❌ Model not loaded")
+# Header
+st.markdown("""
+<div class="header">
+    <h1>🧠 PromptCoach</h1>
+    <p>AI-powered marketing prompt evaluator built with Gemma 3n</p>
+</div>
+""", unsafe_allow_html=True)
 
-# Main Content
-col1, col2 = st.columns([3, 1])
+# Demo notice if Gemma not available
+if not GEMMA_AVAILABLE or st.session_state.model is None:
+    st.markdown("""
+    <div class="demo-notice">
+        <p>⚠️ Demo Mode: Install kagglehub and transformers to use Gemma 3n locally</p>
+    </div>
+    """, unsafe_allow_html=True)
 
-with col1:
-    st.markdown("## 📝 Enter Your Marketing Prompt")
-    
-    # Dynamic placeholders based on content type
-    placeholders = {
-        "Landing Page Headlines": "AI-powered project management tool for remote teams",
-        "Product Descriptions": "Wireless noise-cancelling headphones with 30-hour battery life",
-        "Email Subject Lines": "New product launch announcement with early bird discount",
-        "Social Media Posts": "Behind-the-scenes content about our company culture",
-        "Ad Copy": "Online course teaching digital marketing to beginners",
-        "Custom Prompt": "Write a compelling call-to-action for my SaaS landing page"
-    }
-    
-    prompt_input = st.text_area(
-        "Your Marketing Prompt",
-        placeholder=placeholders.get(template, "Enter your marketing prompt here..."),
-        height=120,
-        help="Be specific about your product, target audience, and key benefits"
-    )
-    
-    # Content type specific tips
-    tips = {
-        "Landing Page Headlines": "💡 **Tip**: Include your target audience, main benefit, and create urgency or curiosity",
-        "Product Descriptions": "💡 **Tip**: Focus on benefits over features, include social proof, and address pain points",
-        "Email Subject Lines": "💡 **Tip**: Keep it under 50 characters, create urgency, and personalize when possible",
-        "Social Media Posts": "💡 **Tip**: Include hashtags, engage with questions, and use emojis strategically",
-        "Ad Copy": "💡 **Tip**: Include a clear value proposition, call-to-action, and address objections"
-    }
-    
-    st.markdown(tips.get(template, "💡 **Tip**: Be clear and specific about what you want to create"))
+# Input Section
+st.markdown('<div class="input-section">', unsafe_allow_html=True)
 
-with col2:
-    st.markdown("## 🎯 Quick Templates")
-    
-    template_options = {
-        "💼 B2B SaaS": "cloud-based CRM software for small businesses",
-        "🛍️ E-commerce": "eco-friendly water bottles with temperature control",
-        "📱 Mobile App": "meditation app with AI-powered personalized sessions",
-        "🎓 Online Course": "complete web development bootcamp for beginners",
-        "🏥 Healthcare": "telemedicine platform connecting patients with specialists",
-        "🎮 Gaming": "multiplayer strategy game with blockchain rewards"
-    }
-    
-    for button_text, template_prompt in template_options.items():
-        if st.button(button_text, use_container_width=True):
-            st.session_state.quick_prompt = template_prompt
-            st.rerun()
-    
-    if 'quick_prompt' in st.session_state:
-        prompt_input = st.session_state.quick_prompt
+# Category selection
+category = st.selectbox(
+    "Select Content Type",
+    list(PROMPT_CATEGORIES.keys()),
+    help="Choose the type of marketing content you want to evaluate"
+)
 
-# Generation Button
-if st.button("🚀 Generate Marketing Content", type="primary", use_container_width=True):
+# Display category info
+if category:
+    st.markdown(f"**{category}**: {PROMPT_CATEGORIES[category]['description']}")
+    st.markdown(f"*Example: {PROMPT_CATEGORIES[category]['example']}*")
+
+# Prompt input
+prompt_input = st.text_area(
+    "Enter your marketing prompt to evaluate",
+    height=120,
+    placeholder=f"Example: {PROMPT_CATEGORIES[category]['example']}",
+    help="Paste your current marketing prompt here for evaluation and improvement"
+)
+
+# Evaluate button
+evaluate_button = st.button("🔍 Evaluate Prompt", type="primary")
+
+st.markdown('</div>', unsafe_allow_html=True)
+
+# Results Section
+if evaluate_button:
     if not prompt_input.strip():
-        st.error("Please enter a marketing prompt to generate content.")
+        st.error("Please enter a marketing prompt to evaluate.")
     else:
-        with st.spinner("🎨 Generating your marketing content..."):
+        with st.spinner("Analyzing your prompt with Gemma 3n..."):
             start_time = time.time()
             
-            # Generate content
-            if not STREAMLIT_CLOUD and st.session_state.model is not None:
-                output = generate_with_gemma(
+            # Evaluate prompt
+            if GEMMA_AVAILABLE and st.session_state.model is not None:
+                result = evaluate_prompt(
                     prompt_input, 
-                    template, 
-                    num_outputs, 
-                    temperature, 
-                    max_tokens,
-                    st.session_state.tokenizer,
+                    category, 
+                    st.session_state.tokenizer, 
                     st.session_state.model
                 )
                 model_used = "Gemma 3n E2B"
             else:
-                output = demo_generate_content(prompt_input, template, num_outputs)
+                result = demo_evaluation(prompt_input, category)
                 model_used = "Demo Mode"
             
-            # Translate output if needed
-            if translate_output_to != 'English':
-                with st.spinner("🌐 Translating output..."):
-                    translated_output = translate_text(output, translate_output_to)
+            analysis_time = time.time() - start_time
+            
+            if "error" in result:
+                st.error(result["error"])
             else:
-                translated_output = output
-            
-            generation_time = time.time() - start_time
-            
-            # Display results
-            st.success(f"✅ Content generated in {generation_time:.2f} seconds!")
-            
-            # Results container
-            st.markdown(f"""
-            <div class="output-container">
-                <h3>📄 Generated {template}</h3>
-                <p><strong>Prompt:</strong> {prompt_input}</p>
-                <p><strong>Model:</strong> {model_used} | <strong>Language:</strong> {translate_output_to}</p>
-                <hr>
-                <div style="white-space: pre-wrap; font-family: system-ui;">
-{translated_output}
+                # Display results
+                st.markdown('<div class="results-section">', unsafe_allow_html=True)
+                
+                # Score display
+                score = result.get('score', 5)
+                if score >= 8:
+                    score_class = "score-good"
+                elif score >= 6:
+                    score_class = "score-medium"
+                else:
+                    score_class = "score-poor"
+                
+                st.markdown(f"""
+                <div class="score-display">
+                    <div class="score-circle {score_class}">{score}</div>
+                    <div>
+                        <h3 style="margin: 0; color: #111827;">Prompt Score</h3>
+                        <p style="margin: 0; color: #6b7280;">Analyzed in {analysis_time:.2f}s with {model_used}</p>
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Action buttons
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                if st.button("🔄 Generate More", use_container_width=True):
-                    st.rerun()
-            
-            with col2:
-                st.download_button(
-                    label="📥 Download Content",
-                    data=translated_output,
-                    file_name=f"{template.lower().replace(' ', '_')}_content.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-            
-            with col3:
-                if st.button("📊 Analytics", use_container_width=True):
-                    st.info("📈 **Content Analytics**: Word count, readability score, and engagement predictions coming soon!")
+                """, unsafe_allow_html=True)
+                
+                # Feedback sections
+                feedback_sections = [
+                    ("strengths", "✅ Strengths", "What's working well in your prompt"),
+                    ("weaknesses", "⚠️ Areas for Improvement", "What could be enhanced"),
+                    ("improved", "🚀 Improved Version", "Enhanced version of your prompt"),
+                    ("variation", "🔄 A/B Test Variation", "Alternative version for testing")
+                ]
+                
+                for key, title, description in feedback_sections:
+                    if key in result:
+                        st.markdown(f"""
+                        <div class="feedback-item {key}">
+                            <h4>{title}</h4>
+                            <p>{result[key]}</p>
+                        </div>
+                        """, unsafe_allow_html=True)
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Action buttons
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("🔄 Analyze Another"):
+                        st.rerun()
+                with col2:
+                    # Create downloadable report
+                    report = f"""PromptCoach Analysis Report
+Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}
+Category: {category}
+
+Original Prompt: {prompt_input}
+
+Score: {score}/10
+
+Strengths: {result.get('strengths', 'N/A')}
+
+Areas for Improvement: {result.get('weaknesses', 'N/A')}
+
+Improved Version: {result.get('improved', 'N/A')}
+
+A/B Variation: {result.get('variation', 'N/A')}
+
+Generated with: {model_used}
+"""
+                    st.download_button(
+                        label="📥 Download Report",
+                        data=report,
+                        file_name=f"promptcoach_analysis_{int(time.time())}.txt",
+                        mime="text/plain"
+                    )
 
 # Footer
 st.markdown("---")
 st.markdown("""
-<div style="text-align: center; padding: 2rem; background: #f8f9fa; border-radius: 10px;">
-    <h4>🚀 PromptCoach - Gemma 3n Marketing Assistant</h4>
-    <p>Built for <strong>Google Gemma 3n Hackathon</strong> | Powered by <strong>Gemma 3n E2B Model</strong></p>
-    <p><em>Generate compelling marketing content with AI-powered creativity and multilingual support</em></p>
-    <p>💡 <strong>Features:</strong> Real-time generation | A/B testing | Multi-language support | Mobile-optimized AI</p>
+<div style="text-align: center; padding: 2rem; color: #6b7280;">
+    <p><strong>PromptCoach</strong> - Built for Google Gemma 3n Hackathon</p>
+    <p>Powered by Gemma 3n E2B | Designed for marketers and founders</p>
 </div>
 """, unsafe_allow_html=True)
